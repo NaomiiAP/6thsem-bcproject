@@ -1,36 +1,68 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Navbar from '../components/Navbar';
 import { motion } from 'framer-motion';
 import { Wallet, Shield, Chrome, Apple, Smartphone } from 'lucide-react';
+import { useWallet } from '../context/WalletContext';
+import { useTrustID } from '../hooks/useTrustID';
 
 export default function Login() {
   const [connecting, setConnecting] = useState(false);
+  const [registering, setRegistering] = useState(false);
+  const [name, setName] = useState('');
+  const [needsRegistration, setNeedsRegistration] = useState(false);
+  const { connectWallet, account, isConnected } = useWallet();
+  const { getProfile, registerDID } = useTrustID();
+  const router = useRouter();
 
-  const connectWallet = async () => {
+  const handleConnect = async () => {
     setConnecting(true);
-    if (typeof window.ethereum !== 'undefined') {
-      try {
-        await (window.ethereum as any).request({ method: 'eth_requestAccounts' });
-        window.location.href = '/dashboard';
-      } catch (error) {
-        console.error('Wallet connection failed:', error);
-      } finally {
-        setConnecting(false);
-      }
-    } else {
-      alert('Please install MetaMask!');
+    try {
+      await connectWallet();
+    } catch (error) {
+      console.error('Wallet connection failed:', error);
+    } finally {
       setConnecting(false);
+    }
+  };
+
+  // Check registration status once connected
+  const handlePostConnect = async () => {
+    if (!account) return;
+    try {
+      const profile = await getProfile(account);
+      if (profile.isRegistered) {
+        router.push('/dashboard');
+      } else {
+        setNeedsRegistration(true);
+      }
+    } catch {
+      setNeedsRegistration(true);
+    }
+  };
+
+  const handleRegister = async () => {
+    if (!name.trim()) return;
+    setRegistering(true);
+    try {
+      await registerDID(name.trim());
+      router.push('/dashboard');
+    } catch (error) {
+      console.error('Registration failed:', error);
+      alert('Registration failed. Make sure you have Sepolia ETH for gas.');
+    } finally {
+      setRegistering(false);
     }
   };
 
   return (
     <main className="min-h-screen bg-black text-white flex flex-col pt-32 px-6">
       <Navbar />
-      
+
       <div className="flex-1 flex items-center justify-center py-20">
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, scale: 0.9 }}
           animate={{ opacity: 1, scale: 1 }}
           className="max-w-md w-full glass-card border-indigo-500/20 text-center"
@@ -39,37 +71,74 @@ export default function Login() {
             <Shield className="text-indigo-400" size={40} />
           </div>
 
-          <h1 className="text-4xl font-bold mb-3 uppercase tracking-tighter">Enter <span className="gradient-text">Vault</span></h1>
-          <p className="text-white/40 mb-10 font-medium">Securely connect your wallet to access your decentralized identity.</p>
+          {!isConnected ? (
+            <>
+              <h1 className="text-4xl font-bold mb-3 uppercase tracking-tighter">Enter <span className="gradient-text">Vault</span></h1>
+              <p className="text-white/40 mb-10 font-medium">Securely connect your wallet to access your decentralized identity.</p>
 
-          <button 
-            onClick={connectWallet}
-            disabled={connecting}
-            className="w-full glow-button !py-5 justify-center text-lg active:scale-95 disabled:opacity-50"
-          >
-            <Wallet size={24} />
-            {connecting ? 'Confirming in Wallet...' : 'Connect MetaMask'}
-          </button>
+              <button
+                onClick={handleConnect}
+                disabled={connecting}
+                className="w-full glow-button !py-5 justify-center text-lg active:scale-95 disabled:opacity-50"
+              >
+                <Wallet size={24} />
+                {connecting ? 'Confirming in Wallet...' : 'Connect MetaMask'}
+              </button>
 
-          <div className="mt-12 space-y-4">
-             <div className="flex items-center gap-4 text-xs font-bold text-white/20 uppercase tracking-[0.2em]">
-                <div className="h-[1px] flex-1 bg-white/5"></div>
-                Other Providers
-                <div className="h-[1px] flex-1 bg-white/5"></div>
-             </div>
+              <div className="mt-12 space-y-4">
+                <div className="flex items-center gap-4 text-xs font-bold text-white/20 uppercase tracking-[0.2em]">
+                  <div className="h-[1px] flex-1 bg-white/5"></div>
+                  Other Providers
+                  <div className="h-[1px] flex-1 bg-white/5"></div>
+                </div>
+                <div className="flex justify-center gap-4">
+                  <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
+                    <Chrome size={20} />
+                  </div>
+                  <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
+                    <Apple size={20} />
+                  </div>
+                  <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
+                    <Smartphone size={20} />
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : needsRegistration ? (
+            <>
+              <h1 className="text-4xl font-bold mb-3 uppercase tracking-tighter">Register <span className="gradient-text">DID</span></h1>
+              <p className="text-white/40 mb-8 font-medium">Create your on-chain decentralized identity on Sepolia.</p>
 
-             <div className="flex justify-center gap-4">
-                <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
-                   <Chrome size={20} />
-                </div>
-                <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
-                   <Apple size={20} />
-                </div>
-                <div className="w-12 h-12 bg-white/5 border border-white/5 rounded-xl flex items-center justify-center opacity-40 hover:opacity-100 hover:border-indigo-500/40 cursor-pointer transition-all">
-                   <Smartphone size={20} />
-                </div>
-             </div>
-          </div>
+              <input
+                type="text"
+                placeholder="Enter your display name..."
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                className="w-full bg-white/5 border border-white/10 px-4 py-4 rounded-xl outline-none focus:border-indigo-500 transition-all font-medium mb-6 text-center"
+              />
+
+              <button
+                onClick={handleRegister}
+                disabled={registering || !name.trim()}
+                className="w-full glow-button !py-5 justify-center text-lg active:scale-95 disabled:opacity-50"
+              >
+                <Shield size={24} />
+                {registering ? 'Registering on Sepolia...' : 'Register Identity'}
+              </button>
+            </>
+          ) : (
+            <>
+              <h1 className="text-4xl font-bold mb-3 uppercase tracking-tighter">Wallet <span className="gradient-text">Connected</span></h1>
+              <p className="text-white/40 mb-8 font-medium">Checking your identity status...</p>
+
+              <button
+                onClick={handlePostConnect}
+                className="w-full glow-button !py-5 justify-center text-lg active:scale-95"
+              >
+                Continue to Dashboard
+              </button>
+            </>
+          )}
         </motion.div>
       </div>
     </main>

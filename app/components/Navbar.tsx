@@ -3,10 +3,12 @@
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
 import { Shield, LayoutDashboard, UserCheck, Search, Wallet } from 'lucide-react';
+import { useWallet } from '../context/WalletContext';
+import { shortenAddress } from '../lib/contract';
 
 export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
-  const [account, setAccount] = useState<string | null>(null);
+  const { account, isConnected, connectWallet, chainId } = useWallet();
 
   useEffect(() => {
     const handleScroll = () => {
@@ -16,18 +18,7 @@ export default function Navbar() {
     return () => window.removeEventListener('scroll', handleScroll);
   }, []);
 
-  const connectWallet = async () => {
-    if (typeof window.ethereum !== 'undefined') {
-      try {
-        const accounts = await (window.ethereum as any).request({ method: 'eth_requestAccounts' });
-        setAccount(accounts[0]);
-      } catch (error) {
-        console.error('Wallet connection failed:', error);
-      }
-    } else {
-      alert('Please install MetaMask!');
-    }
-  };
+  const isWrongNetwork = chainId !== null && chainId !== 11155111;
 
   return (
     <nav className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'bg-[#0a0a0c]/80 backdrop-blur-md border-b border-white/10 py-3' : 'bg-transparent py-6'}`}>
@@ -54,13 +45,18 @@ export default function Navbar() {
           </Link>
         </div>
 
-        <button 
-          onClick={connectWallet}
-          className="glow-button"
-        >
-          <Wallet size={18} />
-          {account ? `${account.slice(0, 6)}...${account.slice(-4)}` : 'Connect Wallet'}
-        </button>
+        <div className="flex items-center gap-3">
+          {isWrongNetwork && (
+            <span className="text-xs text-red-400 font-bold">Wrong Network</span>
+          )}
+          <button
+            onClick={connectWallet}
+            className="glow-button"
+          >
+            <Wallet size={18} />
+            {isConnected && account ? shortenAddress(account) : 'Connect Wallet'}
+          </button>
+        </div>
       </div>
     </nav>
   );
