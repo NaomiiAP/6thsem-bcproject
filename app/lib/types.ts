@@ -15,8 +15,11 @@ export interface DIDProfile {
 }
 
 export interface UploadedDocument {
+  title?: string;
   fileName: string;
   ipfsHash: string;
   gateway: string;
   uploadedAt: string;
+  txHash?: string;
+  credentialHash?: string;
 }

@@ -25,11 +25,13 @@ export default function Dashboard() {
   const [verifyResult, setVerifyResult] = useState<{ hash: string; valid: boolean } | null>(null);
 
   const { account, isConnected } = useWallet();
-  const { getProfile, getMyCredentials, verifyCredential } = useTrustID();
+  const { getProfile, getMyCredentials, verifyCredential, issueCredential, registerDID } = useTrustID();
+  const [registerName, setRegisterName] = useState('');
+  const [registeringDID, setRegisteringDID] = useState(false);
 
   useEffect(() => {
     if (!account) return;
-    const load = async () => {
+    const load = async (attempt = 1) => {
       setLoading(true);
       try {
         const [profile, creds] = await Promise.all([
@@ -40,7 +42,12 @@ export default function Dashboard() {
         setIsRegistered(profile.isRegistered);
         setCredentials(creds);
       } catch (err) {
-        console.error('Failed to load dashboard data:', err);
+        console.error(`Failed to load dashboard data (attempt ${attempt}):`, err);
+        // Retry once after 2s if first attempt fails (flaky RPC)
+        if (attempt < 2) {
+          setTimeout(() => load(attempt + 1), 2000);
+          return;
+        }
       } finally {
         setLoading(false);
       }
@@ -57,16 +64,33 @@ export default function Dashboard() {
     }
   }, [account]);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const [uploadStep, setUploadStep] = useState<'idle' | 'uploading' | 'signing' | 'confirming'>('idle');
+  const [docTitle, setDocTitle] = useState('');
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file || !account) return;
+    if (!file) return;
+    setPendingFile(file);
+    // Pre-fill title with filename (without extension)
+    if (!docTitle) {
+      setDocTitle(file.name.replace(/\.[^/.]+$/, ''));
+    }
+  };
+
+  const handleFileUpload = async () => {
+    if (!pendingFile || !account) return;
+
+    const title = docTitle.trim() || pendingFile.name;
 
     setUploading(true);
     setUploadError('');
+    setUploadStep('uploading');
 
     try {
+      // Step 1: Upload to IPFS via Pinata
       const formData = new FormData();
-      formData.append('file', file);
+      formData.append('file', pendingFile);
       formData.append('walletAddress', account);
 
       const res = await fetch('/api/upload', { method: 'POST', body: formData });
@@ -74,20 +98,49 @@ export default function Dashboard() {
 
       if (!res.ok) throw new Error(data.error || 'Upload failed');
 
+      // Step 2: Sign contract transaction to record on-chain
+      setUploadStep('signing');
+      const metadataJSON = JSON.stringify({
+        title,
+        fileName: data.fileName,
+        ipfsHash: data.ipfsHash,
+        fileSize: data.fileSize,
+        uploadedAt: new Date().toISOString(),
+      });
+
+      const result = await issueCredential(account, 'Document Upload', metadataJSON);
+
+      setUploadStep('confirming');
+      await result.receipt;
+
       const newDoc: UploadedDocument = {
+        title,
         fileName: data.fileName,
         ipfsHash: data.ipfsHash,
         gateway: data.gateway,
         uploadedAt: new Date().toISOString(),
+        txHash: result.tx.hash,
+        credentialHash: result.hash,
       };
 
       const updated = [...documents, newDoc];
       setDocuments(updated);
       localStorage.setItem(`trustid_docs_${account}`, JSON.stringify(updated));
+      setPendingFile(null);
+      setDocTitle('');
     } catch (err: any) {
-      setUploadError(err.message || 'Upload failed');
+      const reason = err.reason || err.message || '';
+      if (err.code === 'ACTION_REJECTED' || err.code === 4001) {
+        setUploadError('Transaction rejected — document was uploaded to IPFS but not recorded on-chain.');
+      } else if (reason.includes('Not registered')) {
+        setIsRegistered(false);
+        setUploadError('NOT_REGISTERED');
+      } else {
+        setUploadError(reason || 'Upload failed');
+      }
     } finally {
       setUploading(false);
+      setUploadStep('idle');
     }
   };
 
@@ -117,12 +170,33 @@ export default function Dashboard() {
   const trustScore = credentials.length > 0 ? Math.round((verifiedCount / credentials.length) * 100) : 0;
 
   const openQR = (value: string) => {
-    setQrValue(value);
+    const origin = window.location.origin;
+    let url: string;
+    if (value.startsWith('0x') && value.length === 66) {
+      url = `${origin}/verifier?hash=${value}`;
+    } else {
+      url = `${origin}/verifier?did=${encodeURIComponent(value)}`;
+    }
+    setQrValue(url);
     setShowQR(true);
   };
 
+  const [copied, setCopied] = useState('');
+
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+    // Try clipboard API, fall through to prompt on any failure
+    const markCopied = () => {
+      setCopied(text);
+      setTimeout(() => setCopied(''), 2000);
+    };
+
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(markCopied).catch(() => {
+        window.prompt('Copy this value:', text);
+      });
+    } else {
+      window.prompt('Copy this value:', text);
+    }
   };
 
   const formatDate = (timestamp: number) => {
@@ -247,6 +321,52 @@ export default function Dashboard() {
                       </div>
                     </div>
 
+                    {!isRegistered && (
+                      <div className="mb-8 p-6 bg-yellow-500/5 border border-yellow-500/30 rounded-2xl">
+                        <h3 className="text-lg font-bold text-yellow-400 mb-2">Register Your Identity</h3>
+                        <p className="text-white/40 text-sm mb-4">Register your DID on-chain to upload documents and receive credentials.</p>
+                        <div className="flex gap-3">
+                          <input
+                            type="text"
+                            placeholder="Enter your display name..."
+                            value={registerName}
+                            onChange={(e) => setRegisterName(e.target.value)}
+                            className="flex-1 bg-white/5 border border-white/10 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 transition-all"
+                          />
+                          <button
+                            onClick={async () => {
+                              if (!registerName.trim()) return;
+                              setRegisteringDID(true);
+                              try {
+                                await registerDID(registerName.trim());
+                                setIsRegistered(true);
+                                setProfileName(registerName.trim());
+                              } catch (err: any) {
+                                const reason = err?.reason || err?.message || '';
+                                if (reason.includes('Already registered')) {
+                                  // Already registered on-chain — just update UI
+                                  setIsRegistered(true);
+                                  // Reload profile to get the on-chain name
+                                  try {
+                                    const profile = await getProfile(account!);
+                                    setProfileName(profile.name);
+                                  } catch { /* ignore */ }
+                                } else {
+                                  alert(reason || 'Registration failed. Make sure you have Sepolia ETH.');
+                                }
+                              } finally {
+                                setRegisteringDID(false);
+                              }
+                            }}
+                            disabled={registeringDID || !registerName.trim()}
+                            className="glow-button !py-3 !px-6 shrink-0 disabled:opacity-50"
+                          >
+                            {registeringDID ? 'Registering...' : 'Register DID'}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="grid sm:grid-cols-3 gap-6 pt-6 border-t border-white/5">
                       <div>
                         <p className="text-white/30 text-xs mb-1 uppercase tracking-widest font-bold">Total Credentials</p>
@@ -269,10 +389,10 @@ export default function Dashboard() {
                       </button>
                       <button
                         onClick={() => account && copyToClipboard(formatDID(account))}
-                        className="glass-card flex-1 justify-center py-4 border-white/5 hover:bg-white/5 font-bold transition-all flex items-center gap-2"
+                        className="glass-card flex-1 justify-center py-4 border-white/5 hover:bg-white/5 font-bold transition-all flex items-center gap-2 cursor-pointer"
                       >
-                        <Copy size={18} />
-                        Copy DID
+                        {copied === (account ? formatDID(account) : '') ? <CheckCircle2 size={18} className="text-green-400" /> : <Copy size={18} />}
+                        {copied === (account ? formatDID(account) : '') ? 'Copied!' : 'Copy DID'}
                       </button>
                     </div>
 
@@ -316,34 +436,106 @@ export default function Dashboard() {
                 animate={{ opacity: 1, y: 0 }}
                 className="space-y-6"
               >
-                <label className={`glass-card border-dashed border-indigo-500/40 bg-indigo-500/5 py-12 text-center group cursor-pointer hover:bg-indigo-500/10 transition-all block ${uploading ? 'pointer-events-none opacity-60' : ''}`}>
-                  <input
-                    type="file"
-                    className="hidden"
-                    accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
-                    onChange={handleFileUpload}
-                    disabled={uploading}
-                  />
-                  <div className="w-16 h-16 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
-                    {uploading ? (
-                      <Loader2 className="text-indigo-400 animate-spin" size={32} />
-                    ) : (
-                      <FileUp className="text-indigo-400" size={32} />
-                    )}
-                  </div>
-                  <h3 className="text-xl font-bold mb-2">
-                    {uploading ? 'Uploading to IPFS...' : 'Upload New Document'}
-                  </h3>
-                  <p className="text-white/40 max-w-sm mx-auto">
-                    Upload Aadhaar, College ID, or Passport. Files are encrypted and stored on IPFS via Pinata.
-                  </p>
-                </label>
+                <div className={`glass-card border-dashed border-indigo-500/40 bg-indigo-500/5 py-8 text-center ${uploading ? 'pointer-events-none opacity-60' : ''}`}>
+                  {/* File selector */}
+                  <label className="cursor-pointer group block mb-6">
+                    <input
+                      type="file"
+                      className="hidden"
+                      accept=".pdf,.jpg,.jpeg,.png,.doc,.docx"
+                      onChange={handleFileSelect}
+                      disabled={uploading}
+                    />
+                    <div className="w-16 h-16 bg-indigo-500/20 rounded-full flex items-center justify-center mx-auto mb-4 group-hover:scale-110 transition-transform">
+                      {uploading ? (
+                        <Loader2 className="text-indigo-400 animate-spin" size={32} />
+                      ) : (
+                        <FileUp className="text-indigo-400" size={32} />
+                      )}
+                    </div>
+                    <h3 className="text-xl font-bold mb-2">
+                      {uploadStep === 'uploading' ? 'Uploading to IPFS...' :
+                       uploadStep === 'signing' ? 'Sign with MetaMask...' :
+                       uploadStep === 'confirming' ? 'Confirming on-chain...' :
+                       pendingFile ? pendingFile.name :
+                       'Select Document'}
+                    </h3>
+                    <p className="text-white/40 max-w-sm mx-auto text-sm">
+                      {uploadStep === 'signing' ? 'Confirm the transaction in MetaMask to record this document on the blockchain.' :
+                       uploadStep === 'confirming' ? 'Waiting for transaction confirmation on Sepolia...' :
+                       pendingFile ? 'Click to change file' :
+                       'Upload Aadhaar, College ID, or Passport. Files are stored on IPFS and recorded on-chain.'}
+                    </p>
+                  </label>
 
-                {uploadError && (
+                  {/* Title + Upload button — shown after file is selected */}
+                  {pendingFile && !uploading && (
+                    <div className="max-w-md mx-auto space-y-4 px-4">
+                      <div className="text-left">
+                        <label className="text-xs text-white/40 font-bold uppercase tracking-widest block mb-2">Document Title</label>
+                        <input
+                          type="text"
+                          placeholder="e.g. My Aadhaar Card"
+                          value={docTitle}
+                          onChange={(e) => setDocTitle(e.target.value)}
+                          className="w-full bg-white/5 border border-white/10 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 transition-all"
+                        />
+                      </div>
+                      <button
+                        onClick={handleFileUpload}
+                        className="glow-button w-full justify-center py-4"
+                      >
+                        <FileUp size={18} />
+                        Upload & Sign On-Chain
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {uploadError && uploadError === 'NOT_REGISTERED' ? (
+                  <div className="glass-card border-yellow-500/30 bg-yellow-500/5 space-y-4">
+                    <p className="text-yellow-400 font-bold">You need to register your DID before uploading on-chain.</p>
+                    <p className="text-white/40 text-sm">Your document was uploaded to IPFS. Register below, then try the upload again to sign it on-chain.</p>
+                    <div className="flex gap-3">
+                      <input
+                        type="text"
+                        placeholder="Enter your display name..."
+                        value={registerName}
+                        onChange={(e) => setRegisterName(e.target.value)}
+                        className="flex-1 bg-white/5 border border-white/10 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 transition-all"
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!registerName.trim()) return;
+                          setRegisteringDID(true);
+                          try {
+                            await registerDID(registerName.trim());
+                            setIsRegistered(true);
+                            setUploadError('');
+                          } catch (err: any) {
+                            const reason = err?.reason || err?.message || '';
+                            if (reason.includes('Already registered')) {
+                              setIsRegistered(true);
+                              setUploadError('');
+                            } else {
+                              setUploadError(reason || 'Registration failed');
+                            }
+                          } finally {
+                            setRegisteringDID(false);
+                          }
+                        }}
+                        disabled={registeringDID || !registerName.trim()}
+                        className="glow-button !py-3 !px-6 shrink-0 disabled:opacity-50"
+                      >
+                        {registeringDID ? 'Registering...' : 'Register DID'}
+                      </button>
+                    </div>
+                  </div>
+                ) : uploadError ? (
                   <div className="p-4 bg-red-500/10 border border-red-500/30 rounded-xl text-red-400 text-sm font-medium">
                     {uploadError}
                   </div>
-                )}
+                ) : null}
 
                 {documents.length === 0 ? (
                   <div className="text-center py-8 text-white/30">No documents uploaded yet.</div>
@@ -357,7 +549,8 @@ export default function Dashboard() {
                               <CheckCircle2 className="text-green-400" size={20} />
                             </div>
                             <div>
-                              <span className="font-bold block">{doc.fileName}</span>
+                              <span className="font-bold block">{doc.title || doc.fileName}</span>
+                              {doc.title && <span className="text-xs text-white/40 block">{doc.fileName}</span>}
                               <span className="text-xs text-white/30">
                                 Uploaded {new Date(doc.uploadedAt).toLocaleDateString()} at {new Date(doc.uploadedAt).toLocaleTimeString()}
                               </span>
@@ -380,6 +573,17 @@ export default function Dashboard() {
                             >
                               <ExternalLink size={16} className="text-white/40 hover:text-white" />
                             </a>
+                            {doc.txHash && (
+                              <a
+                                href={`https://sepolia.etherscan.io/tx/${doc.txHash}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="p-2 hover:bg-indigo-500/10 rounded-lg border border-white/5 transition-colors text-white/40 hover:text-indigo-400"
+                                title="View on Etherscan"
+                              >
+                                <Shield size={16} />
+                              </a>
+                            )}
                             <button
                               onClick={() => removeDocument(i)}
                               className="p-2 hover:bg-red-500/10 rounded-lg border border-white/5 transition-colors text-white/20 hover:text-red-400"
@@ -394,6 +598,20 @@ export default function Dashboard() {
                           <span className="text-xs font-mono text-white/50 flex-1 truncate">{doc.ipfsHash}</span>
                           <span className="text-xs font-bold text-green-400/60 uppercase tracking-widest">Pinned</span>
                         </div>
+                        {doc.txHash && (
+                          <div className="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2 mt-2">
+                            <span className="text-xs font-bold text-white/20 uppercase tracking-widest">TX</span>
+                            <a
+                              href={`https://sepolia.etherscan.io/tx/${doc.txHash}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs font-mono text-indigo-400 hover:underline flex items-center gap-1 flex-1 truncate"
+                            >
+                              {doc.txHash} <ExternalLink size={12} />
+                            </a>
+                            <span className="text-xs font-bold text-green-400/60 uppercase tracking-widest">On-Chain</span>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>

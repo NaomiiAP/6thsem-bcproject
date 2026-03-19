@@ -1,16 +1,17 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import Navbar from '../components/Navbar';
 import { motion } from 'framer-motion';
-import { Wallet, Shield, Chrome, Apple, Smartphone } from 'lucide-react';
+import { Wallet, Shield, Chrome, Apple, Smartphone, Loader2 } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import { useTrustID } from '../hooks/useTrustID';
 
 export default function Login() {
   const [connecting, setConnecting] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [checkingStatus, setCheckingStatus] = useState(false);
   const [name, setName] = useState('');
   const [needsRegistration, setNeedsRegistration] = useState(false);
   const { connectWallet, account, isConnected } = useWallet();
@@ -28,20 +29,33 @@ export default function Login() {
     }
   };
 
-  // Check registration status once connected
-  const handlePostConnect = async () => {
-    if (!account) return;
-    try {
-      const profile = await getProfile(account);
-      if (profile.isRegistered) {
-        router.push('/dashboard');
-      } else {
-        setNeedsRegistration(true);
+  // Automatically check registration once account is available
+  useEffect(() => {
+    if (!account || needsRegistration) return;
+    let cancelled = false;
+    const checkStatus = async () => {
+      setCheckingStatus(true);
+      try {
+        const timeout = new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('timeout')), 8000)
+        );
+        const profile = await Promise.race([getProfile(account), timeout]);
+        if (cancelled) return;
+        if (profile.isRegistered) {
+          router.push('/dashboard');
+        } else {
+          setNeedsRegistration(true);
+        }
+      } catch {
+        if (cancelled) return;
+        // On timeout or error, stop loading so user can proceed manually
+      } finally {
+        if (!cancelled) setCheckingStatus(false);
       }
-    } catch {
-      setNeedsRegistration(true);
-    }
-  };
+    };
+    checkStatus();
+    return () => { cancelled = true; };
+  }, [account]);
 
   const handleRegister = async () => {
     if (!name.trim()) return;
@@ -129,14 +143,23 @@ export default function Login() {
           ) : (
             <>
               <h1 className="text-4xl font-bold mb-3 uppercase tracking-tighter">Wallet <span className="gradient-text">Connected</span></h1>
-              <p className="text-white/40 mb-8 font-medium">Checking your identity status...</p>
+              <p className="text-white/40 mb-8 font-medium">
+                {checkingStatus ? 'Checking your identity status...' : 'Ready to continue.'}
+              </p>
 
-              <button
-                onClick={handlePostConnect}
-                className="w-full glow-button !py-5 justify-center text-lg active:scale-95"
-              >
-                Continue to Dashboard
-              </button>
+              {checkingStatus ? (
+                <div className="w-full glow-button !py-5 justify-center text-lg opacity-70 pointer-events-none">
+                  <Loader2 size={24} className="animate-spin" />
+                  Checking Registration...
+                </div>
+              ) : (
+                <button
+                  onClick={() => router.push('/dashboard')}
+                  className="w-full glow-button !py-5 justify-center text-lg active:scale-95"
+                >
+                  Continue to Dashboard
+                </button>
+              )}
             </>
           )}
         </motion.div>

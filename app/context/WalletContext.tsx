@@ -51,7 +51,8 @@ export function WalletProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     setupProvider();
 
-    if (typeof window === 'undefined' || !window.ethereum) return;
+    const eth = typeof window !== 'undefined' ? window.ethereum : undefined;
+    if (!eth) return;
 
     const handleAccountsChanged = (accounts: string[]) => {
       if (accounts.length === 0) {
@@ -66,12 +67,12 @@ export function WalletProvider({ children }: { children: ReactNode }) {
       setupProvider();
     };
 
-    window.ethereum.on('accountsChanged', handleAccountsChanged);
-    window.ethereum.on('chainChanged', handleChainChanged);
+    eth.on?.('accountsChanged', handleAccountsChanged);
+    eth.on?.('chainChanged', handleChainChanged);
 
     return () => {
-      window.ethereum?.removeListener('accountsChanged', handleAccountsChanged);
-      window.ethereum?.removeListener('chainChanged', handleChainChanged);
+      eth.removeListener?.('accountsChanged', handleAccountsChanged);
+      eth.removeListener?.('chainChanged', handleChainChanged);
     };
   }, [setupProvider]);
 

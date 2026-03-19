@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useCallback, lazy, Suspense } from 'react';
+import { useState, useCallback, useEffect, lazy, Suspense } from 'react';
+import { useSearchParams } from 'next/navigation';
 import Navbar from '../components/Navbar';
 import { motion, AnimatePresence } from 'framer-motion';
 import { QrCode, Upload, ShieldCheck, ShieldAlert, Cpu, ExternalLink, Activity, Info, RefreshCw, Copy, Clock, Camera } from 'lucide-react';
@@ -22,7 +23,15 @@ interface VerificationResult {
   verifiedAt: number;
 }
 
-export default function Verifier() {
+export default function VerifierPage() {
+  return (
+    <Suspense fallback={<main className="min-h-screen bg-black text-white pt-32 px-6 text-center"><Navbar /><p className="text-white/40 mt-20">Loading verifier...</p></main>}>
+      <Verifier />
+    </Suspense>
+  );
+}
+
+function Verifier() {
   const [verifying, setVerifying] = useState(false);
   const [result, setResult] = useState<VerificationResult | null>(null);
   const [hashInput, setHashInput] = useState('');
@@ -30,11 +39,19 @@ export default function Verifier() {
   const [error, setError] = useState('');
   const [history, setHistory] = useState<VerificationResult[]>([]);
   const [showScanner, setShowScanner] = useState(false);
+  const [autoVerified, setAutoVerified] = useState(false);
 
+  const searchParams = useSearchParams();
   const { verifyCredential, getProfile } = useTrustID();
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).catch(() => {
+        window.prompt('Copy this value:', text);
+      });
+    } else {
+      window.prompt('Copy this value:', text);
+    }
   };
 
   const startVerification = async (hash?: string) => {
@@ -83,6 +100,17 @@ export default function Verifier() {
     }
   };
 
+  // Auto-verify from URL query params (e.g. /verifier?hash=0x...)
+  useEffect(() => {
+    if (autoVerified) return;
+    const hash = searchParams.get('hash');
+    if (hash && /^0x[a-fA-F0-9]{64}$/.test(hash)) {
+      setAutoVerified(true);
+      setHashInput(hash);
+      startVerification(hash);
+    }
+  }, [searchParams, autoVerified]);
+
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -103,15 +131,27 @@ export default function Verifier() {
     reader.readAsText(file);
   };
 
+  const extractHash = (data: string): string | null => {
+    // Handle URLs like /verifier?hash=0x...
+    try {
+      const url = new URL(data);
+      const hash = url.searchParams.get('hash');
+      if (hash && /^0x[a-fA-F0-9]{64}$/.test(hash)) return hash;
+    } catch { /* not a URL, try raw */ }
+    // Raw hash
+    if (/^0x[a-fA-F0-9]{64}$/.test(data)) return data;
+    return null;
+  };
+
   const onQRScan = useCallback((data: string) => {
     setShowScanner(false);
-    // The QR might contain a raw hash or a did:ethr: string
     const trimmed = data.trim();
-    setHashInput(trimmed);
-    if (/^0x[a-fA-F0-9]{64}$/.test(trimmed)) {
-      startVerification(trimmed);
+    const hash = extractHash(trimmed);
+    if (hash) {
+      setHashInput(hash);
+      startVerification(hash);
     } else {
-      // Show it in the input so user can see what was scanned
+      setHashInput(trimmed);
       setShowInput(true);
       setError('Scanned value is not a valid credential hash. Got: ' + trimmed.slice(0, 40) + '...');
     }

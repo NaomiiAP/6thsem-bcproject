@@ -105,7 +105,13 @@ export default function Issuer() {
   };
 
   const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
+    if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).catch(() => {
+        window.prompt('Copy this value:', text);
+      });
+    } else {
+      window.prompt('Copy this value:', text);
+    }
   };
 
   const formatDate = (timestamp: number) => {

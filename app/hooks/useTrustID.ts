@@ -21,7 +21,8 @@ export function useTrustID() {
   }, [getSignerContract]);
 
   const getProfile = useCallback(async (address: string): Promise<DIDProfile> => {
-    const contract = getReadOnlyContract();
+    // Use wallet provider if available (more reliable than public RPC)
+    const contract = signer ? getContract(signer) : getReadOnlyContract();
     const [isReg, name] = await Promise.all([
       contract.isRegistered(address),
       contract.getDIDName(address),
@@ -32,7 +33,7 @@ export function useTrustID() {
       name: name || '',
       isRegistered: isReg,
     };
-  }, []);
+  }, [signer]);
 
   const issueCredential = useCallback(async (
     subject: string,
@@ -46,8 +47,12 @@ export function useTrustID() {
     return { tx, receipt, hash };
   }, [getSignerContract]);
 
+  const getReaderContract = useCallback(() => {
+    return signer ? getContract(signer) : getReadOnlyContract();
+  }, [signer]);
+
   const verifyCredential = useCallback(async (hash: string): Promise<CredentialData & { valid: boolean }> => {
-    const contract = getReadOnlyContract();
+    const contract = getReaderContract();
     const result = await contract.verifyCredential(hash);
     return {
       valid: result.valid,
@@ -58,11 +63,11 @@ export function useTrustID() {
       issuedAt: Number(result.issuedAt),
       revoked: result.revoked,
     };
-  }, []);
+  }, [getReaderContract]);
 
   const getMyCredentials = useCallback(async (): Promise<CredentialData[]> => {
     if (!account) return [];
-    const contract = getReadOnlyContract();
+    const contract = getReaderContract();
     const hashes: string[] = await contract.getSubjectCredentials(account);
     const creds = await Promise.all(
       hashes.map(async (hash) => {
@@ -78,11 +83,11 @@ export function useTrustID() {
       })
     );
     return creds;
-  }, [account]);
+  }, [account, getReaderContract]);
 
   const getIssuedCredentials = useCallback(async (): Promise<CredentialData[]> => {
     if (!account) return [];
-    const contract = getReadOnlyContract();
+    const contract = getReaderContract();
     const hashes: string[] = await contract.getIssuerCredentials(account);
     const creds = await Promise.all(
       hashes.map(async (hash) => {
@@ -98,7 +103,7 @@ export function useTrustID() {
       })
     );
     return creds;
-  }, [account]);
+  }, [account, getReaderContract]);
 
   const revokeCredential = useCallback(async (hash: string) => {
     const contract = getSignerContract();
