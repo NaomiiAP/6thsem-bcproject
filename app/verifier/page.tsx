@@ -7,6 +7,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { QrCode, Upload, ShieldCheck, ShieldAlert, Cpu, ExternalLink, Activity, Info, RefreshCw, Copy, Clock, Camera } from 'lucide-react';
 import { useTrustID } from '../hooks/useTrustID';
 import { shortenAddress, formatDID, CONTRACT_ADDRESS } from '../lib/contract';
+import type { CredentialData } from '../lib/types';
 
 const QRScanner = lazy(() => import('../components/QRScanner'));
 
@@ -21,6 +22,37 @@ interface VerificationResult {
   subjectName: string;
   issuerName: string;
   verifiedAt: number;
+}
+
+type AppError = Error & {
+  reason?: string;
+};
+
+function getErrorMessage(error: unknown): string {
+  const appError = error as AppError;
+  return appError?.reason || appError?.message || 'Verification failed';
+}
+
+function extractAddress(input: string): string | null {
+  const trimmed = input.trim();
+  if (/^did:ethr:0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+    return trimmed.slice('did:ethr:'.length);
+  }
+
+  if (/^0x[a-fA-F0-9]{40}$/.test(trimmed)) {
+    return trimmed;
+  }
+
+  return null;
+}
+
+function pickBestCredential(credentials: CredentialData[]): CredentialData | null {
+  if (credentials.length === 0) return null;
+
+  const active = credentials.filter((credential) => !credential.revoked);
+  const pool = active.length > 0 ? active : credentials;
+
+  return [...pool].sort((a, b) => b.issuedAt - a.issuedAt)[0] ?? null;
 }
 
 export default function VerifierPage() {
@@ -42,7 +74,7 @@ function Verifier() {
   const [autoVerified, setAutoVerified] = useState(false);
 
   const searchParams = useSearchParams();
-  const { verifyCredential, getProfile } = useTrustID();
+  const { verifyCredential, getProfile, getCredentialsForSubject } = useTrustID();
 
   const copyToClipboard = (text: string) => {
     if (typeof navigator !== 'undefined' && navigator.clipboard && window.isSecureContext) {
@@ -54,14 +86,10 @@ function Verifier() {
     }
   };
 
-  const startVerification = async (hash?: string) => {
-    const credHash = hash || hashInput.trim();
-    if (!credHash) {
+  const startVerification = useCallback(async (input?: string) => {
+    const verificationInput = (input || hashInput).trim();
+    if (!verificationInput) {
       setShowInput(true);
-      return;
-    }
-    if (!/^0x[a-fA-F0-9]{64}$/.test(credHash)) {
-      setError('Invalid credential hash. Must be a 0x-prefixed 32-byte hex string.');
       return;
     }
 
@@ -70,6 +98,25 @@ function Verifier() {
     setError('');
 
     try {
+      let credHash = verificationInput;
+      if (!/^0x[a-fA-F0-9]{64}$/.test(credHash)) {
+        const subjectAddress = extractAddress(verificationInput);
+        if (!subjectAddress) {
+          setError('Enter a credential hash, DID, or Ethereum address.');
+          return;
+        }
+
+        const subjectCredentials = await getCredentialsForSubject(subjectAddress);
+        const chosenCredential = pickBestCredential(subjectCredentials);
+        if (!chosenCredential) {
+          setError('No credentials found for that DID or address.');
+          return;
+        }
+
+        credHash = chosenCredential.hash;
+        setHashInput(credHash);
+      }
+
       const data = await verifyCredential(credHash);
 
       if (!data.valid && data.issuedAt === 0) {
@@ -93,23 +140,32 @@ function Verifier() {
 
       setResult(verificationResult);
       setHistory(prev => [verificationResult, ...prev.filter(h => h.hash !== credHash)]);
-    } catch (err: any) {
-      setError(err?.reason || err?.message || 'Verification failed');
+    } catch (err: unknown) {
+      setError(getErrorMessage(err));
     } finally {
       setVerifying(false);
     }
-  };
+  }, [getCredentialsForSubject, getProfile, hashInput, verifyCredential]);
 
-  // Auto-verify from URL query params (e.g. /verifier?hash=0x...)
+  // Auto-verify from URL query params (e.g. /verifier?hash=0x... or /verifier?did=did:ethr:0x...)
   useEffect(() => {
     if (autoVerified) return;
     const hash = searchParams.get('hash');
+    const did = searchParams.get('did');
+
     if (hash && /^0x[a-fA-F0-9]{64}$/.test(hash)) {
       setAutoVerified(true);
       setHashInput(hash);
-      startVerification(hash);
+      void startVerification(hash);
+      return;
     }
-  }, [searchParams, autoVerified]);
+
+    if (did) {
+      setAutoVerified(true);
+      setHashInput(did);
+      void startVerification(did);
+    }
+  }, [searchParams, autoVerified, startVerification]);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -120,7 +176,7 @@ function Verifier() {
         const json = JSON.parse(event.target?.result as string);
         if (json.credentialHash) {
           setHashInput(json.credentialHash);
-          startVerification(json.credentialHash);
+          void startVerification(json.credentialHash);
         } else {
           setError('Invalid JSON file. Must contain a "credentialHash" field.');
         }
@@ -137,9 +193,13 @@ function Verifier() {
       const url = new URL(data);
       const hash = url.searchParams.get('hash');
       if (hash && /^0x[a-fA-F0-9]{64}$/.test(hash)) return hash;
+
+      const did = url.searchParams.get('did');
+      if (did) return did;
     } catch { /* not a URL, try raw */ }
-    // Raw hash
+
     if (/^0x[a-fA-F0-9]{64}$/.test(data)) return data;
+    if (extractAddress(data)) return data;
     return null;
   };
 
@@ -149,13 +209,13 @@ function Verifier() {
     const hash = extractHash(trimmed);
     if (hash) {
       setHashInput(hash);
-      startVerification(hash);
+      void startVerification(hash);
     } else {
       setHashInput(trimmed);
       setShowInput(true);
-      setError('Scanned value is not a valid credential hash. Got: ' + trimmed.slice(0, 40) + '...');
+      setError('Scanned value is not a valid credential hash, DID, or address. Got: ' + trimmed.slice(0, 40) + '...');
     }
-  }, []);
+  }, [startVerification]);
 
   const verifyAgain = () => {
     setResult(null);
@@ -166,7 +226,7 @@ function Verifier() {
 
   const verifyFromHistory = (hash: string) => {
     setHashInput(hash);
-    startVerification(hash);
+    void startVerification(hash);
   };
 
   const formatDate = (timestamp: number) => {
@@ -236,17 +296,17 @@ function Verifier() {
               exit={{ opacity: 0, y: -10 }}
               className="glass-card mb-12"
             >
-              <label className="text-xs text-white/40 font-bold uppercase tracking-widest block mb-3">Credential Hash</label>
+              <label className="text-xs text-white/40 font-bold uppercase tracking-widest block mb-3">Credential Hash / DID / Address</label>
               <div className="flex gap-4">
                 <input
                   type="text"
-                  placeholder="0x..."
+                  placeholder="0x..., did:ethr:0x..., or 0x wallet"
                   value={hashInput}
                   onChange={(e) => { setHashInput(e.target.value); setError(''); }}
                   className="flex-1 bg-white/5 border border-white/10 px-4 py-4 rounded-xl outline-none focus:border-indigo-500 transition-all font-mono text-sm"
                 />
                 <button
-                  onClick={() => startVerification()}
+                  onClick={() => void startVerification()}
                   className="glow-button !px-8"
                 >
                   Verify
@@ -375,7 +435,7 @@ function Verifier() {
                   Verify Another
                 </button>
                 <button
-                  onClick={() => startVerification(result.hash)}
+                  onClick={() => void startVerification(result.hash)}
                   className="glass-card flex-1 justify-center py-4 border-white/5 hover:bg-white/5 font-bold transition-all flex items-center gap-2"
                 >
                   <ShieldCheck size={18} />

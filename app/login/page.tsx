@@ -55,7 +55,7 @@ export default function Login() {
     };
     checkStatus();
     return () => { cancelled = true; };
-  }, [account]);
+  }, [account, getProfile, needsRegistration, router]);
 
   const handleRegister = async () => {
     if (!name.trim()) return;

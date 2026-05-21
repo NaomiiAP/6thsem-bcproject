@@ -4,11 +4,65 @@ import QRCode from 'react-qr-code';
 import { useState, useEffect } from 'react';
 import Navbar from '../components/Navbar';
 import { motion, AnimatePresence } from 'framer-motion';
-import { FileUp, Shield, Share2, Award, Copy, ExternalLink, X, Loader2, CheckCircle2, Clock, ArrowUpRight, ArrowDownLeft, ShieldCheck, ShieldAlert, Trash2 } from 'lucide-react';
+import { FileUp, Shield, Share2, Award, Copy, ExternalLink, X, Loader2, CheckCircle2, Clock, ArrowUpRight, ArrowDownLeft, ShieldCheck, ShieldAlert, Eye } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import { useTrustID } from '../hooks/useTrustID';
 import { formatDID, shortenAddress, CONTRACT_ADDRESS } from '../lib/contract';
 import type { CredentialData, UploadedDocument } from '../lib/types';
+
+const MAX_UPLOAD_SIZE_BYTES = 25 * 1024 * 1024;
+
+type AppError = Error & {
+  code?: number | string;
+  reason?: string;
+};
+
+interface PendingIpfsUpload {
+  title: string;
+  fileName: string;
+  ipfsHash: string;
+  fileSize: number;
+  gateway: string;
+  mimeType: string;
+}
+
+function getErrorDetails(error: unknown) {
+  const appError = error as AppError;
+
+  return {
+    code: appError?.code,
+    reason: appError?.reason || appError?.message || '',
+  };
+}
+
+function getShareBaseUrl(): string {
+  const configuredUrl = process.env.NEXT_PUBLIC_APP_URL?.trim();
+  if (configuredUrl) {
+    return configuredUrl.replace(/\/+$/, '');
+  }
+
+  return window.location.origin;
+}
+
+function formatFileSize(sizeInBytes: number) {
+  if (sizeInBytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(sizeInBytes / 1024))} KB`;
+  }
+
+  return `${(sizeInBytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isImageDocument(mimeType?: string) {
+  return !!mimeType?.startsWith('image/');
+}
+
+function isPdfDocument(mimeType?: string, fileName?: string) {
+  return mimeType === 'application/pdf' || fileName?.toLowerCase().endsWith('.pdf');
+}
+
+function isPreviewableDocument(doc: UploadedDocument | PendingIpfsUpload) {
+  return isImageDocument(doc.mimeType) || isPdfDocument(doc.mimeType, doc.fileName);
+}
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'profile' | 'docs' | 'credentials' | 'activity'>('profile');
@@ -23,6 +77,7 @@ export default function Dashboard() {
   const [uploadError, setUploadError] = useState('');
   const [verifyingHash, setVerifyingHash] = useState<string | null>(null);
   const [verifyResult, setVerifyResult] = useState<{ hash: string; valid: boolean } | null>(null);
+  const [viewingDocument, setViewingDocument] = useState<UploadedDocument | null>(null);
 
   const { account, isConnected } = useWallet();
   const { getProfile, getMyCredentials, verifyCredential, issueCredential, registerDID } = useTrustID();
@@ -57,21 +112,38 @@ export default function Dashboard() {
 
   // Load uploaded docs from localStorage
   useEffect(() => {
+    setPendingFile(null);
+    setPendingIpfsUpload(null);
+    setDocTitle('');
+    setUploadError('');
     if (!account) return;
     const stored = localStorage.getItem(`trustid_docs_${account}`);
     if (stored) {
       try { setDocuments(JSON.parse(stored)); } catch { /* ignore */ }
+    } else {
+      setDocuments([]);
     }
   }, [account]);
 
   const [uploadStep, setUploadStep] = useState<'idle' | 'uploading' | 'signing' | 'confirming'>('idle');
   const [docTitle, setDocTitle] = useState('');
   const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingIpfsUpload, setPendingIpfsUpload] = useState<PendingIpfsUpload | null>(null);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      setUploadError('File is too large for demo upload. Please keep it under 25 MB.');
+      setPendingFile(null);
+      setPendingIpfsUpload(null);
+      return;
+    }
+
+    setUploadError('');
     setPendingFile(file);
+    setPendingIpfsUpload(null);
     // Pre-fill title with filename (without extension)
     if (!docTitle) {
       setDocTitle(file.name.replace(/\.[^/.]+$/, ''));
@@ -79,32 +151,51 @@ export default function Dashboard() {
   };
 
   const handleFileUpload = async () => {
-    if (!pendingFile || !account) return;
+    if (!account) return;
 
-    const title = docTitle.trim() || pendingFile.name;
+    const title = docTitle.trim() || pendingIpfsUpload?.title || pendingFile?.name;
+    if (!title) {
+      setUploadError('Choose a document before uploading.');
+      return;
+    }
 
     setUploading(true);
     setUploadError('');
-    setUploadStep('uploading');
 
     try {
-      // Step 1: Upload to IPFS via Pinata
-      const formData = new FormData();
-      formData.append('file', pendingFile);
-      formData.append('walletAddress', account);
+      let uploadedData = pendingIpfsUpload;
+      if (!uploadedData) {
+        if (!pendingFile) {
+          throw new Error('Choose a document before uploading.');
+        }
 
-      const res = await fetch('/api/upload', { method: 'POST', body: formData });
-      const data = await res.json();
+        setUploadStep('uploading');
+        const formData = new FormData();
+        formData.append('file', pendingFile);
+        formData.append('walletAddress', account);
 
-      if (!res.ok) throw new Error(data.error || 'Upload failed');
+        const res = await fetch('/api/upload', { method: 'POST', body: formData });
+        const data = await res.json();
 
-      // Step 2: Sign contract transaction to record on-chain
+        if (!res.ok) throw new Error(data.error || 'Upload failed');
+
+        uploadedData = {
+          title,
+          fileName: data.fileName,
+          ipfsHash: data.ipfsHash,
+          fileSize: data.fileSize,
+          gateway: data.gateway,
+          mimeType: data.mimeType,
+        };
+        setPendingIpfsUpload(uploadedData);
+      }
+
       setUploadStep('signing');
       const metadataJSON = JSON.stringify({
         title,
-        fileName: data.fileName,
-        ipfsHash: data.ipfsHash,
-        fileSize: data.fileSize,
+        fileName: uploadedData.fileName,
+        ipfsHash: uploadedData.ipfsHash,
+        fileSize: uploadedData.fileSize,
         uploadedAt: new Date().toISOString(),
       });
 
@@ -115,9 +206,11 @@ export default function Dashboard() {
 
       const newDoc: UploadedDocument = {
         title,
-        fileName: data.fileName,
-        ipfsHash: data.ipfsHash,
-        gateway: data.gateway,
+        fileName: uploadedData.fileName,
+        ipfsHash: uploadedData.ipfsHash,
+        gateway: uploadedData.gateway,
+        mimeType: uploadedData.mimeType,
+        fileSize: uploadedData.fileSize,
         uploadedAt: new Date().toISOString(),
         txHash: result.tx.hash,
         credentialHash: result.hash,
@@ -127,10 +220,11 @@ export default function Dashboard() {
       setDocuments(updated);
       localStorage.setItem(`trustid_docs_${account}`, JSON.stringify(updated));
       setPendingFile(null);
+      setPendingIpfsUpload(null);
       setDocTitle('');
-    } catch (err: any) {
-      const reason = err.reason || err.message || '';
-      if (err.code === 'ACTION_REJECTED' || err.code === 4001) {
+    } catch (err: unknown) {
+      const { code, reason } = getErrorDetails(err);
+      if (code === 'ACTION_REJECTED' || code === 4001) {
         setUploadError('Transaction rejected — document was uploaded to IPFS but not recorded on-chain.');
       } else if (reason.includes('Not registered')) {
         setIsRegistered(false);
@@ -141,14 +235,6 @@ export default function Dashboard() {
     } finally {
       setUploading(false);
       setUploadStep('idle');
-    }
-  };
-
-  const removeDocument = (index: number) => {
-    const updated = documents.filter((_, i) => i !== index);
-    setDocuments(updated);
-    if (account) {
-      localStorage.setItem(`trustid_docs_${account}`, JSON.stringify(updated));
     }
   };
 
@@ -170,12 +256,12 @@ export default function Dashboard() {
   const trustScore = credentials.length > 0 ? Math.round((verifiedCount / credentials.length) * 100) : 0;
 
   const openQR = (value: string) => {
-    const origin = window.location.origin;
+    const baseUrl = getShareBaseUrl();
     let url: string;
     if (value.startsWith('0x') && value.length === 66) {
-      url = `${origin}/verifier?hash=${value}`;
+      url = `${baseUrl}/verifier?hash=${value}`;
     } else {
-      url = `${origin}/verifier?did=${encodeURIComponent(value)}`;
+      url = `${baseUrl}/verifier?did=${encodeURIComponent(value)}`;
     }
     setQrValue(url);
     setShowQR(true);
@@ -341,8 +427,8 @@ export default function Dashboard() {
                                 await registerDID(registerName.trim());
                                 setIsRegistered(true);
                                 setProfileName(registerName.trim());
-                              } catch (err: any) {
-                                const reason = err?.reason || err?.message || '';
+                              } catch (err: unknown) {
+                                const { reason } = getErrorDetails(err);
                                 if (reason.includes('Already registered')) {
                                   // Already registered on-chain — just update UI
                                   setIsRegistered(true);
@@ -457,19 +543,21 @@ export default function Dashboard() {
                       {uploadStep === 'uploading' ? 'Uploading to IPFS...' :
                        uploadStep === 'signing' ? 'Sign with MetaMask...' :
                        uploadStep === 'confirming' ? 'Confirming on-chain...' :
+                       pendingIpfsUpload ? `Ready to Sign ${pendingIpfsUpload.fileName}` :
                        pendingFile ? pendingFile.name :
                        'Select Document'}
                     </h3>
                     <p className="text-white/40 max-w-sm mx-auto text-sm">
                       {uploadStep === 'signing' ? 'Confirm the transaction in MetaMask to record this document on the blockchain.' :
                        uploadStep === 'confirming' ? 'Waiting for transaction confirmation on Sepolia...' :
+                       pendingIpfsUpload ? 'This file is already pinned on IPFS. You can finish the on-chain step without uploading again.' :
                        pendingFile ? 'Click to change file' :
                        'Upload Aadhaar, College ID, or Passport. Files are stored on IPFS and recorded on-chain.'}
                     </p>
                   </label>
 
                   {/* Title + Upload button — shown after file is selected */}
-                  {pendingFile && !uploading && (
+                  {(pendingFile || pendingIpfsUpload) && !uploading && (
                     <div className="max-w-md mx-auto space-y-4 px-4">
                       <div className="text-left">
                         <label className="text-xs text-white/40 font-bold uppercase tracking-widest block mb-2">Document Title</label>
@@ -481,12 +569,18 @@ export default function Dashboard() {
                           className="w-full bg-white/5 border border-white/10 px-4 py-3 rounded-xl outline-none focus:border-indigo-500 transition-all"
                         />
                       </div>
+                      {pendingIpfsUpload && (
+                        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3 text-left text-sm text-emerald-300">
+                          <p className="font-semibold">{pendingIpfsUpload.fileName} is already pinned to IPFS.</p>
+                          <p className="mt-1 text-emerald-200/80">CID: {pendingIpfsUpload.ipfsHash.slice(0, 18)}... • {formatFileSize(pendingIpfsUpload.fileSize)}</p>
+                        </div>
+                      )}
                       <button
                         onClick={handleFileUpload}
                         className="glow-button w-full justify-center py-4"
                       >
                         <FileUp size={18} />
-                        Upload & Sign On-Chain
+                        {pendingIpfsUpload ? 'Record Existing IPFS Upload On-Chain' : 'Upload & Sign On-Chain'}
                       </button>
                     </div>
                   )}
@@ -512,8 +606,8 @@ export default function Dashboard() {
                             await registerDID(registerName.trim());
                             setIsRegistered(true);
                             setUploadError('');
-                          } catch (err: any) {
-                            const reason = err?.reason || err?.message || '';
+                          } catch (err: unknown) {
+                            const { reason } = getErrorDetails(err);
                             if (reason.includes('Already registered')) {
                               setIsRegistered(true);
                               setUploadError('');
@@ -558,6 +652,13 @@ export default function Dashboard() {
                           </div>
                           <div className="flex gap-2 items-center">
                             <button
+                              onClick={() => setViewingDocument(doc)}
+                              className="p-2 hover:bg-white/5 rounded-lg border border-white/5 transition-colors"
+                              title={isPreviewableDocument(doc) ? 'Preview document' : 'Open document details'}
+                            >
+                              <Eye size={16} />
+                            </button>
+                            <button
                               onClick={() => copyToClipboard(doc.ipfsHash)}
                               className="p-2 hover:bg-white/5 rounded-lg border border-white/5 transition-colors"
                               title="Copy IPFS CID"
@@ -584,13 +685,6 @@ export default function Dashboard() {
                                 <Shield size={16} />
                               </a>
                             )}
-                            <button
-                              onClick={() => removeDocument(i)}
-                              className="p-2 hover:bg-red-500/10 rounded-lg border border-white/5 transition-colors text-white/20 hover:text-red-400"
-                              title="Remove from vault"
-                            >
-                              <Trash2 size={16} />
-                            </button>
                           </div>
                         </div>
                         <div className="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2">
@@ -598,6 +692,17 @@ export default function Dashboard() {
                           <span className="text-xs font-mono text-white/50 flex-1 truncate">{doc.ipfsHash}</span>
                           <span className="text-xs font-bold text-green-400/60 uppercase tracking-widest">Pinned</span>
                         </div>
+                        {doc.fileSize && (
+                          <div className="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2 mt-2">
+                            <span className="text-xs font-bold text-white/20 uppercase tracking-widest">Size</span>
+                            <span className="text-xs text-white/50 flex-1">{formatFileSize(doc.fileSize)}</span>
+                            {doc.mimeType && (
+                              <span className="text-xs font-bold text-indigo-300/70 uppercase tracking-widest">
+                                {doc.mimeType.split('/')[1] || doc.mimeType}
+                              </span>
+                            )}
+                          </div>
+                        )}
                         {doc.txHash && (
                           <div className="flex items-center gap-3 bg-white/5 rounded-lg px-3 py-2 mt-2">
                             <span className="text-xs font-bold text-white/20 uppercase tracking-widest">TX</span>
@@ -835,6 +940,90 @@ export default function Dashboard() {
               >
                 Close Portal
               </button>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      <AnimatePresence>
+        {viewingDocument && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-6">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setViewingDocument(null)}
+              className="absolute inset-0 bg-black/85 backdrop-blur-xl"
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.96, y: 16 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.96, y: 16 }}
+              className="glass-card relative z-10 w-full max-w-5xl max-h-[90vh] overflow-hidden border-white/10"
+            >
+              <button
+                onClick={() => setViewingDocument(null)}
+                className="absolute top-4 right-4 z-20 rounded-lg border border-white/10 bg-black/40 p-2 text-white/60 transition-colors hover:text-white"
+              >
+                <X size={20} />
+              </button>
+
+              <div className="border-b border-white/10 px-6 py-5 pr-16">
+                <p className="text-xs font-bold uppercase tracking-widest text-white/30">Document Viewer</p>
+                <h3 className="mt-1 text-2xl font-bold">{viewingDocument.title || viewingDocument.fileName}</h3>
+                <p className="mt-2 text-sm text-white/40">
+                  {viewingDocument.fileName}
+                  {viewingDocument.fileSize ? ` • ${formatFileSize(viewingDocument.fileSize)}` : ''}
+                  {viewingDocument.mimeType ? ` • ${viewingDocument.mimeType}` : ''}
+                </p>
+              </div>
+
+              <div className="max-h-[calc(90vh-170px)] overflow-auto bg-black/30 p-6">
+                {isImageDocument(viewingDocument.mimeType) ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img
+                    src={viewingDocument.gateway}
+                    alt={viewingDocument.title || viewingDocument.fileName}
+                    className="mx-auto max-h-[70vh] w-auto rounded-2xl border border-white/10 bg-black/40 object-contain"
+                  />
+                ) : isPdfDocument(viewingDocument.mimeType, viewingDocument.fileName) ? (
+                  <iframe
+                    src={viewingDocument.gateway}
+                    title={viewingDocument.title || viewingDocument.fileName}
+                    className="h-[70vh] w-full rounded-2xl border border-white/10 bg-white"
+                  />
+                ) : (
+                  <div className="rounded-2xl border border-white/10 bg-white/5 p-10 text-center">
+                    <p className="text-lg font-semibold">Inline preview is not available for this file type.</p>
+                    <p className="mt-2 text-sm text-white/40">
+                      Open the document in a new tab to view or download it from the IPFS gateway.
+                    </p>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex items-center justify-between gap-4 border-t border-white/10 px-6 py-4">
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-xs font-mono text-white/30">{viewingDocument.ipfsHash}</p>
+                </div>
+                <div className="flex items-center gap-3">
+                  <a
+                    href={viewingDocument.gateway}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="rounded-xl border border-white/10 px-4 py-3 text-sm font-semibold text-white/80 transition-colors hover:bg-white/5 hover:text-white flex items-center gap-2"
+                  >
+                    <ExternalLink size={16} />
+                    Open Gateway
+                  </a>
+                  <button
+                    onClick={() => setViewingDocument(null)}
+                    className="glow-button !py-3 !px-5"
+                  >
+                    Close
+                  </button>
+                </div>
+              </div>
             </motion.div>
           </div>
         )}

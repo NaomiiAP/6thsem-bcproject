@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useRef, useState } from 'react';
-import { Html5Qrcode } from 'html5-qrcode';
+import { Html5Qrcode, Html5QrcodeScannerState } from 'html5-qrcode';
 import { Camera, XCircle } from 'lucide-react';
 
 interface QRScannerProps {
@@ -14,6 +14,25 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const containerId = 'qr-reader';
 
+  const stopScanner = async () => {
+    const scanner = scannerRef.current;
+    if (!scanner) return;
+
+    const state = scanner.getState();
+    if (
+      state !== Html5QrcodeScannerState.SCANNING &&
+      state !== Html5QrcodeScannerState.PAUSED
+    ) {
+      return;
+    }
+
+    try {
+      await scanner.stop();
+    } catch (stopError) {
+      console.error('QR scanner stop error:', stopError);
+    }
+  };
+
   useEffect(() => {
     const scanner = new Html5Qrcode(containerId);
     scannerRef.current = scanner;
@@ -22,22 +41,21 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
       .start(
         { facingMode: 'environment' },
         { fps: 10, qrbox: { width: 250, height: 250 } },
-        (decodedText) => {
-          // Stop scanning after a successful read
-          scanner.stop().catch(() => {});
+        async (decodedText) => {
+          await stopScanner();
           onScan(decodedText);
         },
         () => {
-          // Ignore scan failures (no QR in frame)
+          // Ignore scan failures while waiting for a valid QR in frame.
         }
       )
-      .catch((err) => {
+      .catch((startError) => {
         setError('Could not access camera. Make sure you allow camera permissions.');
-        console.error('QR scanner error:', err);
+        console.error('QR scanner error:', startError);
       });
 
     return () => {
-      scanner.stop().catch(() => {});
+      void stopScanner();
     };
   }, [onScan]);
 
@@ -50,7 +68,7 @@ export default function QRScanner({ onScan, onClose }: QRScannerProps) {
         </div>
         <button
           onClick={() => {
-            scannerRef.current?.stop().catch(() => {});
+            void stopScanner();
             onClose();
           }}
           className="p-2 hover:bg-white/5 rounded-lg border border-white/5 transition-colors text-white/40 hover:text-white"

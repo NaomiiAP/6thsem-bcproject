@@ -1,18 +1,27 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import Navbar from '../components/Navbar';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import { ShieldCheck, ShieldAlert, Award, CheckCircle, ExternalLink, Copy, Loader2, XCircle, RefreshCw } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import { useTrustID } from '../hooks/useTrustID';
-import { shortenAddress, formatDID, CONTRACT_ADDRESS } from '../lib/contract';
+import { shortenAddress, CONTRACT_ADDRESS } from '../lib/contract';
 import type { CredentialData } from '../lib/types';
+
+type AppError = Error & {
+  reason?: string;
+};
+
+function getErrorMessage(error: unknown): string {
+  const appError = error as AppError;
+  return appError?.reason || appError?.message || 'Transaction failed';
+}
 
 export default function Issuer() {
   const [activePortal, setActivePortal] = useState<'issued' | 'issuance'>('issuance');
   const { account, isConnected } = useWallet();
-  const { issueCredential, getIssuedCredentials, revokeCredential, verifyCredential, getProfile } = useTrustID();
+  const { issueCredential, getIssuedCredentials, revokeCredential, getProfile } = useTrustID();
 
   // Issuance form
   const [subjectDID, setSubjectDID] = useState('');
@@ -28,7 +37,7 @@ export default function Issuer() {
   const [loadingCreds, setLoadingCreds] = useState(false);
   const [revokingHash, setRevokingHash] = useState<string | null>(null);
 
-  const loadCreds = async () => {
+  const loadCreds = useCallback(async () => {
     if (!account) return;
     setLoadingCreds(true);
     try {
@@ -50,12 +59,12 @@ export default function Issuer() {
     } finally {
       setLoadingCreds(false);
     }
-  };
+  }, [account, getIssuedCredentials, getProfile]);
 
   useEffect(() => {
     if (!account || activePortal !== 'issued') return;
-    loadCreds();
-  }, [account, activePortal]);
+    void loadCreds();
+  }, [account, activePortal, loadCreds]);
 
   const handleIssue = async () => {
     setError('');
@@ -75,9 +84,9 @@ export default function Issuer() {
       setTxHash(result.tx.hash);
       setIssuedHash(result.hash);
       setIssueStatus('success');
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('Issue failed:', err);
-      setError(err?.reason || err?.message || 'Transaction failed');
+      setError(getErrorMessage(err));
       setIssueStatus('idle');
     }
   };
@@ -88,8 +97,8 @@ export default function Issuer() {
       await revokeCredential(hash);
       // Update local state
       setIssuedCreds(prev => prev.map(c => c.hash === hash ? { ...c, revoked: true } : c));
-    } catch (err: any) {
-      alert(err?.reason || err?.message || 'Revoke failed');
+    } catch (err: unknown) {
+      alert(getErrorMessage(err) || 'Revoke failed');
     } finally {
       setRevokingHash(null);
     }
@@ -112,11 +121,6 @@ export default function Issuer() {
     } else {
       window.prompt('Copy this value:', text);
     }
-  };
-
-  const formatDate = (timestamp: number) => {
-    if (!timestamp) return 'N/A';
-    return new Date(timestamp * 1000).toLocaleDateString();
   };
 
   const formatDateTime = (timestamp: number) => {
@@ -326,7 +330,7 @@ export default function Issuer() {
               <div className="glass-card text-center py-12">
                 <Award className="text-white/10 mx-auto mb-4" size={48} />
                 <p className="text-white/40 text-lg">No credentials issued yet.</p>
-                <p className="text-white/20 mt-2">Switch to "Issue New" to create verifiable credentials.</p>
+                <p className="text-white/20 mt-2">Switch to &quot;Issue New&quot; to create verifiable credentials.</p>
               </div>
             ) : (
               <div className="grid gap-5">

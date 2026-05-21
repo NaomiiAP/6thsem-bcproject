@@ -1,6 +1,15 @@
 import { ethers } from "ethers";
 
 export const CONTRACT_ADDRESS = process.env.NEXT_PUBLIC_CONTRACT_ADDRESS || "";
+const DEFAULT_SEPOLIA_RPC_URL = "https://rpc.sepolia.org";
+
+function ensureContractAddress() {
+  if (!CONTRACT_ADDRESS) {
+    throw new Error(
+      "NEXT_PUBLIC_CONTRACT_ADDRESS is missing. Set it in .env.local and restart the app."
+    );
+  }
+}
 
 export const CONTRACT_ABI = [
   {"anonymous":false,"inputs":[{"indexed":true,"internalType":"bytes32","name":"hash","type":"bytes32"},{"indexed":true,"internalType":"address","name":"subject","type":"address"},{"indexed":true,"internalType":"address","name":"issuer","type":"address"},{"indexed":false,"internalType":"string","name":"credentialType","type":"string"}],"name":"CredentialIssued","type":"event"},
@@ -23,12 +32,14 @@ export const CONTRACT_ABI = [
 ];
 
 export function getContract(signerOrProvider: ethers.Signer | ethers.Provider) {
+  ensureContractAddress();
   return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signerOrProvider);
 }
 
 export function getReadOnlyContract() {
+  ensureContractAddress();
   const provider = new ethers.JsonRpcProvider(
-    process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL || "https://rpc.sepolia.org"
+    process.env.NEXT_PUBLIC_SEPOLIA_RPC_URL || DEFAULT_SEPOLIA_RPC_URL
   );
   return new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, provider);
 }

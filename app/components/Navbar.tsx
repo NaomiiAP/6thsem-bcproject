@@ -2,13 +2,13 @@
 
 import Link from 'next/link';
 import { useState, useEffect } from 'react';
-import { Shield, LayoutDashboard, UserCheck, Search, Wallet } from 'lucide-react';
+import { Shield, LayoutDashboard, UserCheck, Search, Wallet, LogOut } from 'lucide-react';
 import { useWallet } from '../context/WalletContext';
 import { shortenAddress } from '../lib/contract';
 
 export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
-  const { account, isConnected, connectWallet, chainId } = useWallet();
+  const { account, isConnected, connectWallet, disconnectWallet, switchToSepolia, chainId } = useWallet();
 
   useEffect(() => {
     const handleScroll = () => {
@@ -47,15 +47,36 @@ export default function Navbar() {
 
         <div className="flex items-center gap-3">
           {isWrongNetwork && (
-            <span className="text-xs text-red-400 font-bold">Wrong Network</span>
+            <button
+              onClick={() => void switchToSepolia()}
+              className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-xs font-bold text-red-300 transition-colors hover:bg-red-500/20"
+            >
+              Switch to Sepolia
+            </button>
           )}
-          <button
-            onClick={connectWallet}
-            className="glow-button"
-          >
-            <Wallet size={18} />
-            {isConnected && account ? shortenAddress(account) : 'Connect Wallet'}
-          </button>
+          {isConnected && account ? (
+            <>
+              <div className="hidden sm:flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/80">
+                <Wallet size={16} />
+                {shortenAddress(account)}
+              </div>
+              <button
+                onClick={disconnectWallet}
+                className="rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-white/80 transition-colors hover:bg-white/10 hover:text-white flex items-center gap-2"
+              >
+                <LogOut size={16} />
+                Logout
+              </button>
+            </>
+          ) : (
+            <button
+              onClick={connectWallet}
+              className="glow-button"
+            >
+              <Wallet size={18} />
+              Connect Wallet
+            </button>
+          )}
         </div>
       </div>
     </nav>

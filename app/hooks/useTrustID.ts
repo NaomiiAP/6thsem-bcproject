@@ -105,6 +105,25 @@ export function useTrustID() {
     return creds;
   }, [account, getReaderContract]);
 
+  const getCredentialsForSubject = useCallback(async (subject: string): Promise<CredentialData[]> => {
+    const contract = getReaderContract();
+    const hashes: string[] = await contract.getSubjectCredentials(subject);
+    const creds = await Promise.all(
+      hashes.map(async (hash) => {
+        const c = await contract.getCredential(hash);
+        return {
+          hash,
+          subject: c.subject,
+          issuer: c.issuer,
+          credentialType: c.credentialType,
+          issuedAt: Number(c.issuedAt),
+          revoked: c.revoked,
+        };
+      })
+    );
+    return creds;
+  }, [getReaderContract]);
+
   const revokeCredential = useCallback(async (hash: string) => {
     const contract = getSignerContract();
     const tx = await contract.revokeCredential(hash);
@@ -119,6 +138,7 @@ export function useTrustID() {
     verifyCredential,
     getMyCredentials,
     getIssuedCredentials,
+    getCredentialsForSubject,
     revokeCredential,
   };
 }

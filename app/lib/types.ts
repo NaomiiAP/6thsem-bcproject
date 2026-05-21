@@ -19,7 +19,9 @@ export interface UploadedDocument {
   fileName: string;
   ipfsHash: string;
   gateway: string;
+  mimeType?: string;
   uploadedAt: string;
+  fileSize?: number;
   txHash?: string;
   credentialHash?: string;
 }
